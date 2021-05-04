@@ -28,6 +28,7 @@ using Newtonsoft.Json;
 using System.Net;
 using QuantConnect.Lean.Engine.DataFeeds;
 using QuantConnect.Securities;
+using QuantConnect.Util;
 
 namespace QuantConnect.ToolBox.IQFeed
 {
@@ -35,7 +36,7 @@ namespace QuantConnect.ToolBox.IQFeed
     /// Class implements several interfaces to support IQFeed symbol mapping to LEAN and symbol lookup
     /// Refer to IQFeed symbols guide for more info: http://www.iqfeed.net/symbolguide/index.cfm?symbolguide=guide
     /// </summary>
-    public class IQFeedDataQueueUniverseProvider : IDataQueueUniverseProvider, ISymbolMapper
+    public class IQFeedDataQueueUniverseProvider : IDataQueueUniverseProvider, ISymbolMapper, IDisposable
     {
         // IQFeed CSV file column nomenclature
         private const int columnSymbol = 0;
@@ -51,7 +52,7 @@ namespace QuantConnect.ToolBox.IQFeed
         private const string NewLine = "\r\n";
         private const char Tabulation = '\t';
 
-        private IDataCacheProvider _dataCacheProvider = new ZipDataCacheProvider(new DefaultDataProvider(), isDataEphemeral:true);
+        private IDataCacheProvider _dataCacheProvider = new ZipDataCacheProvider(new DefaultDataProvider(), isDataEphemeral: true);
 
         // Database of all symbols
         // We store symbol data in memory by default (e.g. Equity, FX),
@@ -100,7 +101,8 @@ namespace QuantConnect.ToolBox.IQFeed
         /// <returns>IQFeed ticker</returns>
         public string GetBrokerageSymbol(Symbol symbol)
         {
-            return _symbols.ContainsKey(symbol) ? _symbols[symbol] : string.Empty;
+            string leanSymbol;
+            return _symbols.TryGetValue(symbol, out leanSymbol) ? leanSymbol : string.Empty;
         }
 
         /// <summary>
@@ -123,10 +125,11 @@ namespace QuantConnect.ToolBox.IQFeed
         /// </summary>
         /// <param name="lookupName">String representing the name to lookup</param>
         /// <param name="securityType">Expected security type of the returned symbols (if any)</param>
+        /// <param name="includeExpired">Include expired contracts</param>
         /// <param name="securityCurrency">Expected security currency(if any)</param>
         /// <param name="securityExchange">Expected security exchange name(if any)</param>
         /// <returns></returns>
-        public IEnumerable<Symbol> LookupSymbols(string lookupName, SecurityType securityType, string securityCurrency = null, string securityExchange = null)
+        public IEnumerable<Symbol> LookupSymbols(string lookupName, SecurityType securityType, bool includeExpired, string securityCurrency = null, string securityExchange = null)
         {
             Func<Symbol, string> lookupFunc;
 
@@ -183,11 +186,22 @@ namespace QuantConnect.ToolBox.IQFeed
         }
 
         /// <summary>
-        /// Returns whether the time can be advanced or not.
+        /// Method returns a collection of Symbols that are available at the data source.
         /// </summary>
-        /// <param name="securityType">The security type</param>
-        /// <returns>true if the time can be advanced</returns>
-        public bool CanAdvanceTime(SecurityType securityType)
+        /// <param name="symbol">Symbol to lookup</param>
+        /// <param name="includeExpired">Include expired contracts</param>
+        /// <param name="securityCurrency">Expected security currency(if any)</param>
+        /// <returns>Symbol results</returns>
+        public IEnumerable<Symbol> LookupSymbols(Symbol symbol, bool includeExpired, string securityCurrency)
+        {
+            return LookupSymbols(symbol.ID.Symbol, symbol.SecurityType, includeExpired, securityCurrency);
+        }
+
+        /// <summary>
+        /// Returns whether selection can take place or not.
+        /// </summary>
+        /// <returns>True if selection can take place</returns>
+        public bool CanPerformSelection()
         {
             return true;
         }
@@ -306,7 +320,7 @@ namespace QuantConnect.ToolBox.IQFeed
 
                 var columns = line.Split(Tabulation);
 
-                if (columns[columnSymbol] == "TST$Y") continue;
+                if (columns[columnSymbol] == "TST$Y") continue; // skip test symbol
 
                 if (columns.Length != totalColumns)
                 {
@@ -376,7 +390,7 @@ namespace QuantConnect.ToolBox.IQFeed
                     case "FUTURE":
 
                         // we are not interested in designated continuous contracts
-                        if (columns[columnSymbol].EndsWith("#") || columns[columnSymbol].EndsWith("#C"))
+                        if (columns[columnSymbol].EndsWith("#") || columns[columnSymbol].EndsWith("#C") || columns[columnSymbol].EndsWith("$$"))
                             continue;
 
                         var futuresTicker = columns[columnSymbol].TrimStart(new[] { '@' });
@@ -691,6 +705,14 @@ namespace QuantConnect.ToolBox.IQFeed
         {
             return _symbols.Where(kpv => kpv.Key.SecurityType == SecurityType.Future && kpv.Key.ID.Symbol == subscribeSymbol.ID.Symbol)
                 .Select(kpv => kpv.Value);
+        }
+
+        /// <summary>
+        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
+        /// </summary>
+        public void Dispose()
+        {
+            _dataCacheProvider.DisposeSafely();
         }
     }
 }

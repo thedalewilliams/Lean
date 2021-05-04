@@ -1,4 +1,4 @@
-﻿/*
+/*
  * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
  * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
  *
@@ -15,15 +15,21 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Newtonsoft.Json;
 using NodaTime;
 using NUnit.Framework;
 using Python.Runtime;
+using QuantConnect.Algorithm;
 using QuantConnect.Algorithm.Framework.Alphas;
+using QuantConnect.Data;
+using QuantConnect.Data.Auxiliary;
 using QuantConnect.Data.Market;
 using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Indicators;
+using QuantConnect.Lean.Engine.DataFeeds;
+using QuantConnect.Lean.Engine.HistoricalData;
 using QuantConnect.Orders;
 using QuantConnect.Orders.Fees;
 using QuantConnect.Packets;
@@ -602,6 +608,17 @@ namespace QuantConnect.Tests.Common.Util
             Assert.AreEqual(-0m, value);
         }
 
+        [TestCase("1.23%", 0.0123d)]
+        [TestCase("-1.23%", -0.0123d)]
+        [TestCase("31.2300%", 0.3123d)]
+        [TestCase("20%", 0.2d)]
+        [TestCase("-20%", -0.2d)]
+        [TestCase("220%", 2.2d)]
+        public void ConvertsPercent(string input, double expected)
+        {
+            Assert.AreEqual(new decimal(expected), input.ToNormalizedDecimal());
+        }
+
         [Test]
         public void ConvertsTimeSpanFromString()
         {
@@ -664,6 +681,28 @@ namespace QuantConnect.Tests.Common.Util
             var input = (double) decimal.MinValue;
             var output = input.SafeDecimalCast();
             Assert.AreEqual(decimal.MinValue, output);
+        }
+
+        [TestCase(Language.CSharp, double.NaN)]
+        [TestCase(Language.Python, double.NaN)]
+        [TestCase(Language.CSharp, double.NegativeInfinity)]
+        [TestCase(Language.Python, double.NegativeInfinity)]
+        [TestCase(Language.CSharp, double.PositiveInfinity)]
+        [TestCase(Language.Python, double.PositiveInfinity)]
+        public void SafeDecimalCastThrowsArgumentException(Language language, double number)
+        {
+            if (language == Language.CSharp)
+            {
+                Assert.Throws<ArgumentException>(() => number.SafeDecimalCast());
+                return;
+            }
+
+            using (Py.GIL())
+            {
+                var pyNumber = number.ToPython();
+                var csNumber = pyNumber.As<double>();
+                Assert.Throws<ArgumentException>(() => csNumber.SafeDecimalCast());
+            }
         }
 
         [Test]
@@ -1078,6 +1117,24 @@ actualDictionary.update({'IBM': 5})
             Assert.AreEqual(order.SecurityType, orderTicket.SecurityType);
         }
 
+        [TestCase(4000, "4K")]
+        [TestCase(4103, "4.1K")]
+        [TestCase(40000, "40K")]
+        [TestCase(45321, "45.3K")]
+        [TestCase(654321, "654K")]
+        [TestCase(600031, "600K")]
+        [TestCase(1304303, "1.3M")]
+        [TestCase(2600000, "2.6M")]
+        [TestCase(26000000, "26M")]
+        [TestCase(260000000, "260M")]
+        [TestCase(2600000000, "2.6B")]
+        [TestCase(26000000000, "26B")]
+        public void ToFinancialFigures(double number, string expected)
+        {
+            var value = ((decimal)number).ToFinancialFigures();
+            Assert.AreEqual(expected, value);
+        }
+
         [Test]
         public void DecimalTruncateTo3DecimalPlaces()
         {
@@ -1102,6 +1159,15 @@ actualDictionary.update({'IBM': 5})
         }
 
         [Test]
+        public void DecimalAllowExponentTests()
+        {
+            const string strWithExponent = "5e-5";
+            Assert.AreEqual(strWithExponent.ToDecimalAllowExponent(), 0.00005);
+            Assert.AreNotEqual(strWithExponent.ToDecimal(), 0.00005);
+            Assert.AreEqual(strWithExponent.ToDecimal(), 10275);
+        }
+
+        [Test]
         public void DateRulesToFunc()
         {
             var dateRules = new DateRules(new SecurityManager(
@@ -1116,6 +1182,172 @@ actualDictionary.update({'IBM': 5})
             Assert.AreEqual(second, func(first));
             Assert.AreEqual(Time.EndOfTime, func(second));
             Assert.AreEqual(Time.EndOfTime, func(second));
+        }
+
+        [Test]
+        [TestCase(OptionRight.Call, true, OrderDirection.Sell)]
+        [TestCase(OptionRight.Call, false, OrderDirection.Buy)]
+        [TestCase(OptionRight.Put, true, OrderDirection.Buy)]
+        [TestCase(OptionRight.Put, false, OrderDirection.Sell)]
+        public void GetsExerciseDirection(OptionRight right, bool isShort, OrderDirection expected)
+        {
+            var actual = right.GetExerciseDirection(isShort);
+            Assert.AreEqual(expected, actual);
+        }
+
+        [Test]
+        public void AppliesScalingToEquityTickQuotes()
+        {
+            // This test ensures that all Ticks with TickType == TickType.Quote have adjusted BidPrice and AskPrice.
+            // Relevant issue: https://github.com/QuantConnect/Lean/issues/4788
+
+            var algo = new QCAlgorithm();
+            var dataFeed = new NullDataFeed();
+
+            algo.SubscriptionManager = new SubscriptionManager();
+            algo.SubscriptionManager.SetDataManager(new DataManager(
+                dataFeed,
+                new UniverseSelection(
+                    algo,
+                    new SecurityService(
+                        new CashBook(),
+                        MarketHoursDatabase.FromDataFolder(),
+                        SymbolPropertiesDatabase.FromDataFolder(),
+                        algo,
+                        null,
+                        null
+                    ),
+                    new DataPermissionManager(),
+                    new DefaultDataProvider()
+                ),
+                algo,
+                new TimeKeeper(DateTime.UtcNow),
+                MarketHoursDatabase.FromDataFolder(),
+                false,
+                null,
+                new DataPermissionManager()
+            ));
+
+            using (var zipDataCacheProvider = new ZipDataCacheProvider(new DefaultDataProvider()))
+            {
+                algo.HistoryProvider = new SubscriptionDataReaderHistoryProvider();
+                algo.HistoryProvider.Initialize(
+                    new HistoryProviderInitializeParameters(
+                        null,
+                        null,
+                        null,
+                        zipDataCacheProvider,
+                        new LocalDiskMapFileProvider(),
+                        new LocalDiskFactorFileProvider(),
+                        (_) => {},
+                        false,
+                        new DataPermissionManager()));
+
+                algo.SetStartDate(DateTime.UtcNow.AddDays(-1));
+
+                var history = algo.History(new[] { Symbols.IBM }, new DateTime(2013, 10, 7), new DateTime(2013, 10, 8), Resolution.Tick).ToList();
+                Assert.AreEqual(57401, history.Count);
+
+                foreach (var slice in history)
+                {
+                    if (!slice.Ticks.ContainsKey(Symbols.IBM))
+                    {
+                        continue;
+                    }
+
+                    foreach (var tick in slice.Ticks[Symbols.IBM])
+                    {
+                        if (tick.BidPrice != 0)
+                        {
+                            Assert.LessOrEqual(Math.Abs(tick.Value - tick.BidPrice), 0.05);
+                        }
+                        if (tick.AskPrice != 0)
+                        {
+                            Assert.LessOrEqual(Math.Abs(tick.Value - tick.AskPrice), 0.05);
+                        }
+                    }
+                }
+            }
+        }
+
+        [Test]
+        [TestCase(PositionSide.Long, OrderDirection.Buy)]
+        [TestCase(PositionSide.Short, OrderDirection.Sell)]
+        [TestCase(PositionSide.None, OrderDirection.Hold)]
+        public void ToOrderDirection(PositionSide side, OrderDirection expected)
+        {
+            Assert.AreEqual(expected, side.ToOrderDirection());
+        }
+
+        [Test]
+        [TestCase(OrderDirection.Buy, PositionSide.Long, false)]
+        [TestCase(OrderDirection.Buy, PositionSide.Short, true)]
+        [TestCase(OrderDirection.Buy, PositionSide.None, false)]
+        [TestCase(OrderDirection.Sell, PositionSide.Long, true)]
+        [TestCase(OrderDirection.Sell, PositionSide.Short, false)]
+        [TestCase(OrderDirection.Sell, PositionSide.None, false)]
+        [TestCase(OrderDirection.Hold, PositionSide.Long, false)]
+        [TestCase(OrderDirection.Hold, PositionSide.Short, false)]
+        [TestCase(OrderDirection.Hold, PositionSide.None, false)]
+        public void Closes(OrderDirection direction, PositionSide side, bool expected)
+        {
+            Assert.AreEqual(expected, direction.Closes(side));
+        }
+
+        [Test]
+        public void ListEquals()
+        {
+            var left = new[] {1, 2, 3};
+            var right = new[] {1, 2, 3};
+            Assert.IsTrue(left.ListEquals(right));
+
+            right[2] = 4;
+            Assert.IsFalse(left.ListEquals(right));
+        }
+
+        [Test]
+        public void GetListHashCode()
+        {
+            var ints1 = new[] {1, 2, 3};
+            var ints2 = new[] {1, 3, 2};
+            var longs = new[] {1L, 2L, 3L};
+            var decimals = new[] {1m, 2m, 3m};
+
+            // ordering dependent
+            Assert.AreNotEqual(ints1.GetListHashCode(), ints2.GetListHashCode());
+
+            // type dependent [ dependency on typeof(T).GetHashCode() ]
+            Assert.AreNotEqual(ints1.GetListHashCode(), decimals.GetListHashCode());
+
+            // known type collision - long has same hash code as int within the int range
+            // we could take a hash of typeof(T) but this would require ListEquals to enforce exact types
+            // and we would prefer to allow typeof(T)'s GetHashCode and Equals to make this determination.
+            Assert.AreEqual(ints1.GetListHashCode(), longs.GetListHashCode());
+
+            // deterministic
+            Assert.AreEqual(ints1.GetListHashCode(), new[] {1, 2, 3}.GetListHashCode());
+        }
+
+        [Test]
+        [TestCase("0.999", "0.0001", "0.999")]
+        [TestCase("0.999", "0.001", "0.999")]
+        [TestCase("0.999", "0.01", "1.000")]
+        [TestCase("0.999", "0.1", "1.000")]
+        [TestCase("0.999", "1", "1.000")]
+        [TestCase("0.999", "2", "0")]
+        [TestCase("1.0", "0.15", "1.05")]
+        [TestCase("1.05", "0.15", "1.05")]
+        [TestCase("0.975", "0.15", "1.05")]
+        [TestCase("-0.975", "0.15", "-1.05")]
+        [TestCase("-1.0", "0.15", "-1.05")]
+        [TestCase("-1.05", "0.15", "-1.05")]
+        public void DiscretelyRoundBy(string valueString, string quantaString, string expectedString)
+        {
+            var value = decimal.Parse(valueString, CultureInfo.InvariantCulture);
+            var quanta = decimal.Parse(quantaString, CultureInfo.InvariantCulture);
+            var expected = decimal.Parse(expectedString, CultureInfo.InvariantCulture);
+            var actual = value.DiscretelyRoundBy(quanta);
+            Assert.AreEqual(expected, actual);
         }
 
         private PyObject ConvertToPyObject(object value)

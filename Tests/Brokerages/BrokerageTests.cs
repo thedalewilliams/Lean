@@ -14,9 +14,11 @@
 */
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
@@ -106,12 +108,6 @@ namespace QuantConnect.Tests.Brokerages
                 Assert.Fail("Failed to connect to brokerage");
             }
 
-            //gdax does not have a user data stream. Instead, we need to symbol subscribe and monitor for our orders.
-            if (brokerage.Name == "GDAX")
-            {
-                ((QuantConnect.Brokerages.GDAX.GDAXBrokerage)brokerage).Subscribe(new[] { Symbol });
-            }
-
             Log.Trace("");
             Log.Trace("GET OPEN ORDERS");
             Log.Trace("");
@@ -128,6 +124,7 @@ namespace QuantConnect.Tests.Brokerages
                 // these securities don't need to be real, just used for the ISecurityProvider impl, required
                 // by brokerages to track holdings
                 SecurityProvider[accountHolding.Symbol] = CreateSecurity(accountHolding.Symbol);
+                SecurityProvider[accountHolding.Symbol].Holdings.SetHoldings(accountHolding.AveragePrice, accountHolding.Quantity);
             }
             brokerage.OrderStatusChanged += (sender, args) =>
             {
@@ -420,17 +417,17 @@ namespace QuantConnect.Tests.Brokerages
         }
 
         [Test]
-        public void GetCashBalanceContainsUSD()
+        public void GetCashBalanceContainsSomething()
         {
             Log.Trace("");
             Log.Trace("GET CASH BALANCE");
             Log.Trace("");
             var balance = Brokerage.GetCashBalance();
-            Assert.AreEqual(1, balance.Count(x => x.Currency == Currencies.USD));
+            Assert.IsTrue(balance.Any());
         }
 
         [Test]
-        public void GetAccountHoldings()
+        public virtual void GetAccountHoldings()
         {
             Log.Trace("");
             Log.Trace("GET ACCOUNT HOLDINGS");
@@ -452,7 +449,7 @@ namespace QuantConnect.Tests.Brokerages
             Assert.AreEqual(GetDefaultQuantity(), afterQuantity - beforeQuantity);
         }
 
-        [Test, Ignore("This test requires reading the output and selection of a low volume security for the Brokerage")]
+        [Test, Explicit("This test requires reading the output and selection of a low volume security for the Brokerage")]
         public void PartialFills()
         {
             var manualResetEvent = new ManualResetEvent(false);
@@ -465,7 +462,7 @@ namespace QuantConnect.Tests.Brokerages
                 lock (sync)
                 {
                     remaining -= orderEvent.FillQuantity;
-                    Console.WriteLine("Remaining: " + remaining + " FillQuantity: " + orderEvent.FillQuantity);
+                    Log.Trace("Remaining: " + remaining + " FillQuantity: " + orderEvent.FillQuantity);
                     if (orderEvent.Status == OrderStatus.Filled)
                     {
                         manualResetEvent.Set();
@@ -484,7 +481,7 @@ namespace QuantConnect.Tests.Brokerages
             manualResetEvent.WaitOne(2500);
             manualResetEvent.WaitOne(2500);
 
-            Console.WriteLine("Remaining: " + remaining);
+            Log.Trace("Remaining: " + remaining);
             Assert.AreEqual(0, remaining);
         }
 
@@ -605,5 +602,45 @@ namespace QuantConnect.Tests.Brokerages
 
             return order;
         }
+
+        protected SubscriptionDataConfig GetSubscriptionDataConfig<T>(Symbol symbol, Resolution resolution)
+        {
+            return new SubscriptionDataConfig(
+                typeof(T),
+                symbol,
+                resolution,
+                TimeZones.Utc,
+                TimeZones.Utc,
+                true,
+                true,
+                false);
+        }
+
+        protected void ProcessFeed(IEnumerator<BaseData> enumerator, CancellationTokenSource cancellationToken, Action<BaseData> callback = null)
+        {
+            Task.Factory.StartNew(() =>
+            {
+                try
+                {
+                    while (enumerator.MoveNext() && !cancellationToken.IsCancellationRequested)
+                    {
+                        BaseData tick = enumerator.Current;
+                        if (callback != null)
+                        {
+                            callback.Invoke(tick);
+                        }
+                    }
+                }
+                catch (AssertionException)
+                {
+                    throw;
+                }
+                catch (Exception err)
+                {
+                    Log.Error(err.Message);
+                }
+            }, cancellationToken.Token);
+        }
+
     }
 }

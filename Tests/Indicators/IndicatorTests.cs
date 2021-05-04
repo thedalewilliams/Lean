@@ -177,7 +177,7 @@ namespace QuantConnect.Tests.Indicators
                     instantiatedIndicator = Activator.CreateInstance(indicator, new object[] {10});
                     counter++;
                 }
-                catch (Exception e)
+                catch (Exception)
                 {
                     // Some indicators will fail because they don't have a single-parameter constructor.
                     continue;
@@ -300,7 +300,7 @@ namespace QuantConnect.Tests.Indicators
             /// <returns>A new value for this indicator</returns>
             protected override decimal ComputeNextValue(IndicatorDataPoint input)
             {
-                return input;
+                return input.Value;
             }
         }
     }

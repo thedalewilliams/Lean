@@ -241,6 +241,10 @@ namespace QuantConnect.Orders
                     {
                         return AccessOrder<StopLimitOrder>(this, field, o => o.LimitPrice, r => r.LimitPrice);
                     }
+                    if (_submitRequest.OrderType == OrderType.LimitIfTouched)
+                    {
+                        return AccessOrder<LimitIfTouchedOrder>(this, field, o => o.LimitPrice, r => r.LimitPrice);
+                    }
                     break;
 
                 case OrderField.StopPrice:
@@ -253,6 +257,9 @@ namespace QuantConnect.Orders
                         return AccessOrder<StopMarketOrder>(this, field, o => o.StopPrice, r => r.StopPrice);
                     }
                     break;
+                
+                case OrderField.TriggerPrice:
+                    return AccessOrder<LimitIfTouchedOrder>(this, field, o => o.TriggerPrice, r => r.TriggerPrice);
 
                 default:
                     throw new ArgumentOutOfRangeException(nameof(field), field, null);
@@ -307,7 +314,7 @@ namespace QuantConnect.Orders
 
         /// <summary>
         /// Submits an <see cref="UpdateOrderRequest"/> with the <see cref="SecurityTransactionManager"/> to update
-        /// the ticker with limitprice specified in <paramref name="limitPrice"/> and with tag specified in <paramref name="quantity"/>
+        /// the ticker with limit price specified in <paramref name="limitPrice"/> and with tag specified in <paramref name="tag"/>
         /// </summary>
         /// <param name="limitPrice"></param>
         /// <param name="tag"></param>
@@ -324,7 +331,7 @@ namespace QuantConnect.Orders
 
         /// <summary>
         /// Submits an <see cref="UpdateOrderRequest"/> with the <see cref="SecurityTransactionManager"/> to update
-        /// the ticker with stopprice specified in <paramref name="stopPrice"/> and with tag specified in <paramref name="quantity"/>
+        /// the ticker with stop price specified in <paramref name="stopPrice"/> and with tag specified in <paramref name="tag"/>
         /// </summary>
         /// <param name="stopPrice"></param>
         /// <param name="tag"></param>
@@ -409,7 +416,10 @@ namespace QuantConnect.Orders
             lock (_orderEventsLock)
             {
                 _orderEvents.Add(orderEvent);
-                if (orderEvent.FillQuantity != 0)
+
+                //Update the ticket and order, if it is a OptionExercise order we must only update it if the fill price is not zero
+                //this fixes issue #2846 where average price is skewed by the removal of the option.
+                if (orderEvent.FillQuantity != 0 && (_order.Type != OrderType.OptionExercise || orderEvent.FillPrice != 0))
                 {
                     // keep running totals of quantity filled and the average fill price so we
                     // don't need to compute these on demand
@@ -417,6 +427,8 @@ namespace QuantConnect.Orders
                     var quantityWeightedFillPrice = _orderEvents.Where(x => x.Status.IsFill())
                         .Aggregate(0m, (d, x) => d + x.AbsoluteFillQuantity*x.FillPrice);
                     _averageFillPrice = quantityWeightedFillPrice/Math.Abs(_quantityFilled);
+
+                    _order.Price = _averageFillPrice;
                 }
             }
 

@@ -51,7 +51,6 @@ namespace QuantConnect.Tests.Engine.DataFeeds.Enumerators
                 null,
                 new ITradableDateEventProvider[] { eventProvider },
                 _tradableDayNotifier,
-                true,
                 DateTime.UtcNow
             );
 
@@ -97,7 +96,7 @@ namespace QuantConnect.Tests.Engine.DataFeeds.Enumerators
 
         public void TriggerEvent()
         {
-            NewTradableDate?.Invoke(this, new NewTradableDateEventArgs(TradableDate, LastBaseData, Symbol));
+            NewTradableDate?.Invoke(this, new NewTradableDateEventArgs(TradableDate, LastBaseData, Symbol, null));
         }
     }
 }

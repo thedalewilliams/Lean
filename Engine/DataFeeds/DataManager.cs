@@ -40,6 +40,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds
         private readonly ITimeKeeper _timeKeeper;
         private readonly bool _liveMode;
         private readonly IRegisteredSecurityDataTypesProvider _registeredTypesProvider;
+        private readonly IDataPermissionManager _dataPermissionManager;
 
         /// There is no ConcurrentHashSet collection in .NET,
         /// so we use ConcurrentDictionary with byte value to minimize memory usage
@@ -66,7 +67,8 @@ namespace QuantConnect.Lean.Engine.DataFeeds
             ITimeKeeper timeKeeper,
             MarketHoursDatabase marketHoursDatabase,
             bool liveMode,
-            IRegisteredSecurityDataTypesProvider registeredTypesProvider)
+            IRegisteredSecurityDataTypesProvider registeredTypesProvider,
+            IDataPermissionManager dataPermissionManager)
         {
             _dataFeed = dataFeed;
             UniverseSelection = universeSelection;
@@ -77,6 +79,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds
             _marketHoursDatabase = marketHoursDatabase;
             _liveMode = liveMode;
             _registeredTypesProvider = registeredTypesProvider;
+            _dataPermissionManager = dataPermissionManager;
 
             // wire ourselves up to receive notifications when universes are added/removed
             algorithm.UniverseManager.CollectionChanged += (sender, args) =>
@@ -176,8 +179,13 @@ namespace QuantConnect.Lean.Engine.DataFeeds
             if (DataFeedSubscriptions.TryGetValue(request.Configuration, out subscription))
             {
                 // duplicate subscription request
-                return subscription.AddSubscriptionRequest(request);
+                subscription.AddSubscriptionRequest(request);
+                // only result true if the existing subscription is internal, we actually added something from the users perspective
+                return subscription.Configuration.IsInternalFeed;
             }
+
+            // before adding the configuration to the data feed let's assert it's valid
+            _dataPermissionManager.AssertConfiguration(request.Configuration);
 
             subscription = _dataFeed.CreateSubscription(request);
 
@@ -252,6 +260,14 @@ namespace QuantConnect.Lean.Engine.DataFeeds
                     }
                     return true;
                 }
+            }
+            else if (universe != null)
+            {
+                // a universe requested removal of a subscription which wasn't present anymore, this can happen when a subscription ends
+                // it will get removed from the data feed subscription list, but the configuration will remain until the universe removes it
+                // why? the effect I found is that the fill models are using these subscriptions to determine which data they could use
+                SubscriptionDataConfig config;
+                _subscriptionManagerSubscriptions.TryRemove(configuration, out config);
             }
             return false;
         }
@@ -336,6 +352,7 @@ namespace QuantConnect.Lean.Engine.DataFeeds
         /// <param name="subscription">The <see cref="Subscription"/> owning the configuration to remove</param>
         private void RemoveSubscriptionDataConfig(Subscription subscription)
         {
+            // the subscription could of ended but might still be part of the universe
             if (subscription.RemovedFromUniverse.Value)
             {
                 SubscriptionDataConfig config;
@@ -442,9 +459,23 @@ namespace QuantConnect.Lean.Engine.DataFeeds
                 }
             }
 
-            var marketHoursDbEntry = _marketHoursDatabase.GetEntry(symbol.ID.Market, symbol, symbol.ID.SecurityType);
+            MarketHoursDatabase.Entry marketHoursDbEntry;
+            if (!_marketHoursDatabase.TryGetEntry(symbol.ID.Market, symbol, symbol.ID.SecurityType, out marketHoursDbEntry))
+            {
+                if (symbol.SecurityType == SecurityType.Base)
+                {
+                    var baseInstance = dataTypes.Single().Item1.GetBaseDataInstance();
+                    baseInstance.Symbol = symbol;
+                    _marketHoursDatabase.SetEntryAlwaysOpen(symbol.ID.Market, null, SecurityType.Base, baseInstance.DataTimeZone());
+                }
+
+                marketHoursDbEntry = _marketHoursDatabase.GetEntry(symbol.ID.Market, symbol, symbol.ID.SecurityType);
+            }
+
             var exchangeHours = marketHoursDbEntry.ExchangeHours;
-            if (symbol.ID.SecurityType == SecurityType.Option || symbol.ID.SecurityType == SecurityType.Future)
+            if (symbol.ID.SecurityType.IsOption() ||
+                symbol.ID.SecurityType == SecurityType.Future ||
+                symbol.ID.SecurityType == SecurityType.Index)
             {
                 dataNormalizationMode = DataNormalizationMode.Raw;
             }
@@ -472,7 +503,8 @@ namespace QuantConnect.Lean.Engine.DataFeeds
                     exchangeHours.TimeZone,
                     fillForward,
                     extendedMarketHours,
-                    isInternalFeed,
+                    // if the subscription data types were not provided and the tick type is OpenInterest we make it internal
+                    subscriptionDataTypes == null && tickType == TickType.OpenInterest || isInternalFeed,
                     isCustomData,
                     isFilteredSubscription: isFilteredSubscription,
                     tickType: tickType,

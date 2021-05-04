@@ -35,6 +35,20 @@ namespace QuantConnect.Tests.Engine.RealTime
     [TestFixture]
     public class BacktestingRealTimeHandlerTests
     {
+        private IResultHandler _resultHandler;
+
+        [SetUp]
+        public void SetUp()
+        {
+            _resultHandler = new TestResultHandler();
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            _resultHandler.Exit();
+        }
+
         [Test]
         public void SortsEventsAfterSetup()
         {
@@ -293,7 +307,7 @@ namespace QuantConnect.Tests.Engine.RealTime
             var realTimeHandler = new BacktestingRealTimeHandler();
             realTimeHandler.Setup(new AlgorithmStub(),
                 new AlgorithmNodePacket(PacketType.AlgorithmNode) { Language = Language.CSharp },
-                new TestResultHandler(),
+                _resultHandler,
                 null,
                 new TestTimeLimitManager());
 
@@ -378,16 +392,16 @@ namespace QuantConnect.Tests.Engine.RealTime
             var realTimeHandler = new TestBacktestingRealTimeHandler();
             realTimeHandler.Setup(algorithm,
                 new AlgorithmNodePacket(PacketType.AlgorithmNode) { Language = language },
-                new TestResultHandler(),
+                _resultHandler,
                 null,
                 new TestTimeLimitManager());
-            // the generic OnEndOfDay()
-            Assert.AreEqual(1, realTimeHandler.GetScheduledEventsCount);
+
+            Assert.AreEqual(0, realTimeHandler.GetScheduledEventsCount);
 
             realTimeHandler.OnSecuritiesChanged(
                 new SecurityChanges(new[] { security }, Enumerable.Empty<Security>()));
 
-            Assert.AreEqual(1, realTimeHandler.GetScheduledEventsCount);
+            Assert.AreEqual(0, realTimeHandler.GetScheduledEventsCount);
 
             realTimeHandler.Exit();
         }
@@ -400,7 +414,7 @@ namespace QuantConnect.Tests.Engine.RealTime
             IAlgorithm algorithm;
             if (language == Language.CSharp)
             {
-                algorithm = new TestAlgorithm();
+                algorithm = new TestAlgorithmB();
                 security = (algorithm as QCAlgorithm).AddEquity("SPY");
             }
             else
@@ -419,16 +433,17 @@ namespace QuantConnect.Tests.Engine.RealTime
             var realTimeHandler = new TestBacktestingRealTimeHandler();
             realTimeHandler.Setup(algorithm,
                 new AlgorithmNodePacket(PacketType.AlgorithmNode) { Language = language },
-                new TestResultHandler(),
+                _resultHandler,
                 null,
                 new TestTimeLimitManager());
-            // the generic OnEndOfDay()
-            Assert.AreEqual(1, realTimeHandler.GetScheduledEventsCount);
+            
+            // Because neither implement EOD() deprecated it should be zero
+            Assert.AreEqual(0, realTimeHandler.GetScheduledEventsCount);
 
             realTimeHandler.OnSecuritiesChanged(
                 new SecurityChanges(new[] { security }, Enumerable.Empty<Security>()));
 
-            Assert.AreEqual(2, realTimeHandler.GetScheduledEventsCount);
+            Assert.AreEqual(1, realTimeHandler.GetScheduledEventsCount);
             realTimeHandler.Exit();
         }
 
@@ -458,12 +473,24 @@ namespace QuantConnect.Tests.Engine.RealTime
         private class TestAlgorithm : AlgorithmStub
         {
             public bool OnEndOfDayFired { get; set; }
-
             public override void OnEndOfDay()
             {
                 OnEndOfDayFired = true;
             }
 
+            public override void OnEndOfDay(Symbol symbol)
+            {
+
+            }
+        }
+
+        /// <summary>
+        /// TestAlgorithmB is just for use where we need EOD() not to
+        /// be implemented, because it is deprecated.
+        /// For tests that require EOD() use TestAlgorithm
+        /// </summary>
+        private class TestAlgorithmB : AlgorithmStub
+        {
             public override void OnEndOfDay(Symbol symbol)
             {
             }

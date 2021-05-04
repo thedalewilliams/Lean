@@ -53,6 +53,12 @@ namespace QuantConnect.Packets
         public string BacktestId = "";
 
         /// <summary>
+        /// OptimizationId for this result packet if any
+        /// </summary>
+        [JsonProperty(PropertyName = "sOptimizationID")]
+        public string OptimizationId;
+
+        /// <summary>
         /// Compile Id for the algorithm which generated this result packet.
         /// </summary>
         [JsonProperty(PropertyName = "sCompileID")]
@@ -147,6 +153,7 @@ namespace QuantConnect.Packets
                 Results             = packet.Results;
                 ProcessingTime      = packet.ProcessingTime;
                 TradeableDates      = packet.TradeableDates;
+                OptimizationId      = packet.OptimizationId;
             }
             catch (Exception err)
             {
@@ -175,6 +182,7 @@ namespace QuantConnect.Packets
                 CompileId = job.CompileId;
                 Channel = job.Channel;
                 BacktestId = job.BacktestId;
+                OptimizationId = job.OptimizationId;
                 Results = results;
                 Name = job.Name;
                 UserId = job.UserId;
@@ -187,6 +195,19 @@ namespace QuantConnect.Packets
             }
         }
 
+        /// <summary>
+        /// Creates an empty result packet, useful when the algorithm fails to initialize
+        /// </summary>
+        /// <param name="job">The associated job packet</param>
+        /// <returns>An empty result packet</returns>
+        public static BacktestResultPacket CreateEmpty(BacktestNodePacket job)
+        {
+            return new BacktestResultPacket(job, new BacktestResult(new BacktestResultParameters(
+                new Dictionary<string, Chart>(), new Dictionary<int, Order>(), new Dictionary<DateTime, decimal>(),
+                new Dictionary<string, string>(), new Dictionary<string, string>(), new Dictionary<string, AlgorithmPerformance>(),
+                new List<OrderEvent>(), new AlgorithmPerformance(), new AlphaRuntimeStatistics()
+            )), DateTime.UtcNow, DateTime.UtcNow);
+        }
     } // End Queue Packet:
 
 

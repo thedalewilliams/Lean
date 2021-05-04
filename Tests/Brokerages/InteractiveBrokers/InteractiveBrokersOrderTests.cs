@@ -16,7 +16,9 @@
 using NUnit.Framework;
 using QuantConnect.Algorithm;
 using QuantConnect.Brokerages.InteractiveBrokers;
+using QuantConnect.Data.Auxiliary;
 using QuantConnect.Interfaces;
+using QuantConnect.Lean.Engine.DataFeeds;
 using QuantConnect.Securities;
 
 namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
@@ -37,7 +39,8 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
                 new TestCaseData(new MarketOrderTestParameters(Symbols.USDJPY)).SetName("MarketOrder"),
                 new TestCaseData(new LimitOrderTestParameters(Symbols.USDJPY, 10000m, 0.01m)).SetName("LimitOrder"),
                 new TestCaseData(new StopMarketOrderTestParameters(Symbols.USDJPY, 10000m, 0.01m)).SetName("StopMarketOrder"),
-                new TestCaseData(new StopLimitOrderTestParameters(Symbols.USDJPY, 10000m, 0.01m)).SetName("StopLimitOrder")
+                new TestCaseData(new StopLimitOrderTestParameters(Symbols.USDJPY, 10000m, 0.01m)).SetName("StopLimitOrder"),
+                new TestCaseData(new LimitIfTouchedOrderTestParameters(Symbols.USDJPY, 10000m, 0.01m)).SetName("LimitIfTouchedOrder")
             };
         }
 
@@ -98,7 +101,7 @@ namespace QuantConnect.Tests.Brokerages.InteractiveBrokers
 
         protected override IBrokerage CreateBrokerage(IOrderProvider orderProvider, ISecurityProvider securityProvider)
         {
-            return new InteractiveBrokersBrokerage(new QCAlgorithm(), orderProvider, securityProvider);
+            return new InteractiveBrokersBrokerage(new QCAlgorithm(), orderProvider, securityProvider, new AggregationManager(), new LocalDiskMapFileProvider());
         }
 
         protected override void DisposeBrokerage(IBrokerage brokerage)

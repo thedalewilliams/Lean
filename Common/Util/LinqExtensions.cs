@@ -1,4 +1,4 @@
-﻿/*
+/*
  * QUANTCONNECT.COM - Democratizing Finance, Empowering Individuals.
  * Lean Algorithmic Trading Engine v2.0. Copyright 2014 QuantConnect Corporation.
  *
@@ -15,6 +15,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Collections.ObjectModel;
 using System.Linq;
 
@@ -90,12 +91,38 @@ namespace QuantConnect.Util
         /// </summary>
         /// <typeparam name="T">The item type of the source enumerable</typeparam>
         /// <typeparam name="TResult">The type of the items in the output <see cref="List{T}"/></typeparam>
-        /// <param name="enumerable">The items to be placed into the enumerable</param>
+        /// <param name="enumerable">The items to be placed into the list</param>
         /// <param name="selector">Selects items from the enumerable to be placed into the <see cref="List{T}"/></param>
         /// <returns>A new <see cref="List{T}"/> containing the items in the enumerable</returns>
         public static List<TResult> ToList<T, TResult>(this IEnumerable<T> enumerable, Func<T, TResult> selector)
         {
             return enumerable.Select(selector).ToList();
+        }
+
+        /// <summary>
+        /// Creates a new array from the projected elements in the specified enumerable
+        /// </summary>
+        /// <typeparam name="T">The item type of the source enumerable</typeparam>
+        /// <typeparam name="TResult">The type of the items in the output array</typeparam>
+        /// <param name="enumerable">The items to be placed into the array</param>
+        /// <param name="selector">Selects items from the enumerable to be placed into the array</param>
+        /// <returns>A new array containing the items in the enumerable</returns>
+        public static TResult[] ToArray<T, TResult>(this IEnumerable<T> enumerable, Func<T, TResult> selector)
+        {
+            return enumerable.Select(selector).ToArray();
+        }
+
+        /// <summary>
+        /// Creates a new immutable array from the projected elements in the specified enumerable
+        /// </summary>
+        /// <typeparam name="T">The item type of the source enumerable</typeparam>
+        /// <typeparam name="TResult">The type of the items in the output array</typeparam>
+        /// <param name="enumerable">The items to be placed into the array</param>
+        /// <param name="selector">Selects items from the enumerable to be placed into the array</param>
+        /// <returns>A new array containing the items in the enumerable</returns>
+        public static ImmutableArray<TResult> ToImmutableArray<T, TResult>(this IEnumerable<T> enumerable, Func<T, TResult> selector)
+        {
+            return enumerable.Select(selector).ToImmutableArray();
         }
 
         /// <summary>
@@ -356,10 +383,24 @@ namespace QuantConnect.Util
         /// <param name="key">Lookup key</param>
         /// <param name="defaultValue">Default value</param>
         /// <returns>Value associated with the specified key or  default value</returns>
-        public static V GetValueOrDefault<K, V>(this IDictionary<K, V> dictionary, K key, V defaultValue)
+        public static V GetValueOrDefault<K, V>(this IDictionary<K, V> dictionary, K key, V defaultValue = default(V))
         {
             V obj;
             return dictionary.TryGetValue(key, out obj) ? obj : defaultValue;
+        }
+
+        /// <summary>
+        /// Performs an action for each element in collection source
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="source">Collection source</param>
+        /// <param name="action">An action to perform</param>
+        public static void DoForEach<T>(this IEnumerable<T> source, Action<T> action)
+        {
+            foreach (var element in source)
+            {
+                action(element);
+            }
         }
     }
 }

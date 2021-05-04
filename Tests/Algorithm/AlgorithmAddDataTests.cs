@@ -20,17 +20,17 @@ using Newtonsoft.Json;
 using NodaTime;
 using NUnit.Framework;
 using QuantConnect.Algorithm;
+using QuantConnect.Algorithm.Selection;
 using QuantConnect.AlgorithmFactory.Python.Wrappers;
 using QuantConnect.Configuration;
 using QuantConnect.Data;
 using QuantConnect.Data.Auxiliary;
 using QuantConnect.Data.Consolidators;
 using QuantConnect.Data.Custom;
-using QuantConnect.Data.Custom.PsychSignal;
-using QuantConnect.Data.Custom.SEC;
+using QuantConnect.Data.Custom.Tiingo;
 using QuantConnect.Data.Custom.TradingEconomics;
-using QuantConnect.Data.Custom.USTreasury;
 using QuantConnect.Data.Market;
+using QuantConnect.Data.UniverseSelection;
 using QuantConnect.Lean.Engine.DataFeeds;
 using QuantConnect.Securities;
 using QuantConnect.Tests.Engine.DataFeeds;
@@ -187,11 +187,11 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual(data.Price, 2);
         }
 
-        [TestCase("EURUSD", typeof(PsychSignalSentiment), SecurityType.Cfd, false, true)]
-        [TestCase("BTCUSD", typeof(PsychSignalSentiment), SecurityType.Crypto, false, true)]
-        [TestCase("CL", typeof(PsychSignalSentiment), SecurityType.Future, false, true)]
-        [TestCase("EURUSD", typeof(PsychSignalSentiment), SecurityType.Forex, false, true)]
-        [TestCase("AAPL", typeof(PsychSignalSentiment), SecurityType.Equity, true, true)]
+        [TestCase("EURUSD", typeof(TiingoNews), SecurityType.Cfd, false, true)]
+        [TestCase("BTCUSD", typeof(TiingoNews), SecurityType.Crypto, false, true)]
+        [TestCase("CL", typeof(TiingoNews), SecurityType.Future, false, true)]
+        [TestCase("EURUSD", typeof(TiingoNews), SecurityType.Forex, false, true)]
+        [TestCase("AAPL", typeof(TiingoNews), SecurityType.Equity, true, true)]
         [TestCase("EURUSD", typeof(TradingEconomicsCalendar), SecurityType.Cfd, false, false)]
         [TestCase("BTCUSD", typeof(TradingEconomicsCalendar), SecurityType.Crypto, false, false)]
         [TestCase("CL", typeof(TradingEconomicsCalendar), SecurityType.Future, false, false)]
@@ -220,7 +220,7 @@ namespace QuantConnect.Tests.Algorithm
                     asset = qcAlgorithm.AddForex(ticker, Resolution.Daily);
                     break;
                 case SecurityType.Future:
-                    asset = qcAlgorithm.AddFuture(ticker, Resolution.Daily);
+                    asset = qcAlgorithm.AddFuture(ticker, Resolution.Minute);
                     break;
                 default:
                     throw new Exception($"SecurityType {securityType} is not valid for this test");
@@ -253,11 +253,11 @@ namespace QuantConnect.Tests.Algorithm
             }
         }
 
-        [TestCase("EURUSD", typeof(PsychSignalSentiment), SecurityType.Cfd, false, false)]
-        [TestCase("BTCUSD", typeof(PsychSignalSentiment), SecurityType.Crypto, false, false)]
-        [TestCase("CL", typeof(PsychSignalSentiment), SecurityType.Future, false, false)]
-        [TestCase("EURUSD", typeof(PsychSignalSentiment), SecurityType.Forex, false, false)]
-        [TestCase("AAPL", typeof(PsychSignalSentiment), SecurityType.Equity, true, true)]
+        [TestCase("EURUSD", typeof(TiingoNews), SecurityType.Cfd, false, false)]
+        [TestCase("BTCUSD", typeof(TiingoNews), SecurityType.Crypto, false, false)]
+        [TestCase("CL", typeof(TiingoNews), SecurityType.Future, false, false)]
+        [TestCase("EURUSD", typeof(TiingoNews), SecurityType.Forex, false, false)]
+        [TestCase("AAPL", typeof(TiingoNews), SecurityType.Equity, true, true)]
         public void AddDataSecurityTickerWithUnderlying(string ticker, Type customDataType, SecurityType securityType, bool securityShouldBeMapped, bool customDataShouldBeMapped)
         {
             SymbolCache.Clear();
@@ -281,7 +281,7 @@ namespace QuantConnect.Tests.Algorithm
                     asset = qcAlgorithm.AddForex(ticker, Resolution.Daily);
                     break;
                 case SecurityType.Future:
-                    asset = qcAlgorithm.AddFuture(ticker, Resolution.Daily);
+                    asset = qcAlgorithm.AddFuture(ticker, Resolution.Minute);
                     break;
                 default:
                     throw new Exception($"SecurityType {securityType} is not valid for this test");
@@ -352,7 +352,7 @@ namespace QuantConnect.Tests.Algorithm
                     asset = qcAlgorithm.AddForex(ticker, Resolution.Daily);
                     break;
                 case SecurityType.Future:
-                    asset = qcAlgorithm.AddFuture(ticker, Resolution.Daily);
+                    asset = qcAlgorithm.AddFuture(ticker, Resolution.Minute);
                     break;
                 default:
                     throw new Exception($"SecurityType {securityType} is not valid for this test");
@@ -395,10 +395,65 @@ namespace QuantConnect.Tests.Algorithm
             }
         }
 
-        [TestCase("AAPL", typeof(PsychSignalSentiment), true)]
-        [TestCase("TWX", typeof(PsychSignalSentiment), true)]
-        [TestCase("FB", typeof(PsychSignalSentiment), true)]
-        [TestCase("NFLX", typeof(PsychSignalSentiment), true)]
+        [Test]
+        public void AddOptionWithUnderlyingFuture()
+        {
+            // Adds an option containing a Future as its underlying Symbol.
+            // This is an essential step in enabling custom derivatives
+            // based on any asset class provided to Option. This test
+            // checks the ability to create Future Options.
+            var algo = new QCAlgorithm();
+            algo.SubscriptionManager.SetDataManager(new DataManagerStub(algo));
+
+            var underlying = algo.AddFuture("ES", Resolution.Minute, Market.CME);
+            underlying.SetFilter(0, 365);
+
+            var futureOption = algo.AddOption(underlying.Symbol, Resolution.Minute);
+
+            Assert.IsTrue(futureOption.Symbol.HasUnderlying);
+            Assert.AreEqual(underlying.Symbol, futureOption.Symbol.Underlying);
+        }
+
+        [Test]
+        public void AddFutureOptionContractNonEquityOption()
+        {
+            // Adds an option contract containing an underlying future contract.
+            // We test to make sure that the security returned is a specific option
+            // contract and with the future as the underlying.
+            var algo = new QCAlgorithm();
+            algo.SubscriptionManager.SetDataManager(new DataManagerStub(algo));
+
+            var underlying = algo.AddFutureContract(
+                Symbol.CreateFuture("ES", Market.CME, new DateTime(2021, 3, 19)),
+                Resolution.Minute);
+
+            var futureOptionContract = algo.AddFutureOptionContract(
+                Symbol.CreateOption(underlying.Symbol, Market.CME, OptionStyle.American, OptionRight.Call, 2550m, new DateTime(2021, 3, 19)),
+                Resolution.Minute);
+
+            Assert.AreEqual(underlying.Symbol, futureOptionContract.Symbol.Underlying);
+            Assert.AreEqual(underlying, futureOptionContract.Underlying);
+            Assert.IsFalse(underlying.Symbol.IsCanonical());
+            Assert.IsFalse(futureOptionContract.Symbol.IsCanonical());
+        }
+
+        [Test]
+        public void AddFutureOptionAddsUniverseSelectionModel()
+        {
+            var algo = new QCAlgorithm();
+            algo.SubscriptionManager.SetDataManager(new DataManagerStub(algo));
+
+            var underlying = algo.AddFuture("ES", Resolution.Minute, Market.CME);
+            underlying.SetFilter(0, 365);
+
+            algo.AddFutureOption(underlying.Symbol, _ => _);
+            Assert.IsTrue(algo.UniverseSelection is OptionChainedUniverseSelectionModel);
+        }
+
+        [TestCase("AAPL", typeof(TiingoNews), true)]
+        [TestCase("TWX", typeof(TiingoNews), true)]
+        [TestCase("FB", typeof(TiingoNews), true)]
+        [TestCase("NFLX", typeof(TiingoNews), true)]
         [TestCase("TWX", typeof(TradingEconomicsCalendar), false)]
         [TestCase("AAPL", typeof(TradingEconomicsCalendar), false)]
         public void AddDataOptionsSymbolHasChainedUnderlyingSymbols(string ticker, Type customDataType, bool customDataShouldBeMapped)
@@ -430,10 +485,10 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual($"?{assetSubscription.MappedSymbol}", customDataSubscription.MappedSymbol);
         }
 
-        [TestCase("AAPL", typeof(PsychSignalSentiment))]
-        [TestCase("TWX", typeof(PsychSignalSentiment))]
-        [TestCase("FB", typeof(PsychSignalSentiment))]
-        [TestCase("NFLX", typeof(PsychSignalSentiment))]
+        [TestCase("AAPL", typeof(TiingoNews))]
+        [TestCase("TWX", typeof(TiingoNews))]
+        [TestCase("FB", typeof(TiingoNews))]
+        [TestCase("NFLX", typeof(TiingoNews))]
         public void AddDataOptionsTickerHasChainedUnderlyingSymbol(string ticker, Type customDataType)
         {
             SymbolCache.Clear();

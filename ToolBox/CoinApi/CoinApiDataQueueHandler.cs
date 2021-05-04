@@ -19,30 +19,48 @@ using System.Linq;
 using System.Threading.Tasks;
 using CoinAPI.WebSocket.V1;
 using CoinAPI.WebSocket.V1.DataModels;
+using Newtonsoft.Json;
+using NodaTime;
 using QuantConnect.Configuration;
 using QuantConnect.Data;
 using QuantConnect.Data.Market;
 using QuantConnect.Interfaces;
+using QuantConnect.Lean.Engine.DataFeeds;
+using QuantConnect.Lean.Engine.HistoricalData;
 using QuantConnect.Logging;
 using QuantConnect.Packets;
+using QuantConnect.ToolBox.CoinApi.Messages;
 using QuantConnect.Util;
+using RestSharp;
+using HistoryRequest = QuantConnect.Data.HistoryRequest;
 
 namespace QuantConnect.ToolBox.CoinApi
 {
     /// <summary>
     /// An implementation of <see cref="IDataQueueHandler"/> for CoinAPI
     /// </summary>
-    public class CoinApiDataQueueHandler : IDataQueueHandler, IDisposable
+    public class CoinApiDataQueueHandler : SynchronizingHistoryProvider, IDataQueueHandler
     {
+        protected int HistoricalDataPerRequestLimit = 10000;
+        private static readonly Dictionary<Resolution, string> _ResolutionToCoinApiPeriodMappings = new Dictionary<Resolution, string>
+        {
+            { Resolution.Second, "1SEC"},
+            { Resolution.Minute, "1MIN" },
+            { Resolution.Hour, "1HRS" },
+            { Resolution.Daily, "1DAY" },
+        };
+
         private readonly string _apiKey = Config.Get("coinapi-api-key");
+        private readonly string[] _streamingDataType;
         private readonly CoinApiWsClient _client;
         private readonly object _locker = new object();
-        private readonly List<Tick> _ticks = new List<Tick>();
         private readonly CoinApiSymbolMapper _symbolMapper = new CoinApiSymbolMapper();
+        private readonly IDataAggregator _dataAggregator = Composer.Instance.GetExportedValueByTypeName<IDataAggregator>(
+            Config.Get("data-aggregator", "QuantConnect.Lean.Engine.DataFeeds.AggregationManager"));
+        private readonly EventBasedDataQueueHandlerSubscriptionManager _subscriptionManager;
 
         private readonly TimeSpan _subscribeDelay = TimeSpan.FromMilliseconds(250);
         private readonly object _lockerSubscriptions = new object();
-        private HashSet<Symbol> _subscribedSymbols = new HashSet<Symbol>();
         private DateTime _lastSubscribeRequestUtcTime = DateTime.MinValue;
         private bool _subscriptionsPending;
 
@@ -56,73 +74,85 @@ namespace QuantConnect.ToolBox.CoinApi
         /// </summary>
         public CoinApiDataQueueHandler()
         {
+            var product = Config.GetValue<CoinApiProduct>("coinapi-product");
+            _streamingDataType = product < CoinApiProduct.Streamer
+                ? new[] { "trade" }
+                : new[] { "trade", "quote" };
+
+            Log.Trace($"CoinApiDataQueueHandler(): using plan '{product}'. Available data types: '{string.Join(",", _streamingDataType)}'");
+
             _client = new CoinApiWsClient();
             _client.TradeEvent += OnTrade;
             _client.QuoteEvent += OnQuote;
             _client.Error += OnError;
+            _subscriptionManager = new EventBasedDataQueueHandlerSubscriptionManager();
+            _subscriptionManager.SubscribeImpl += (s, t) => Subscribe(s);
+            _subscriptionManager.UnsubscribeImpl += (s, t) => Unsubscribe(s);
         }
 
         /// <summary>
-        /// Get the next ticks from the live trading data queue
+        /// Subscribe to the specified configuration
         /// </summary>
-        /// <returns>IEnumerable list of ticks since the last update.</returns>
-        public IEnumerable<BaseData> GetNextTicks()
+        /// <param name="dataConfig">defines the parameters to subscribe to a data feed</param>
+        /// <param name="newDataAvailableHandler">handler to be fired on new data available</param>
+        /// <returns>The new enumerator for this subscription request</returns>
+        public IEnumerator<BaseData> Subscribe(SubscriptionDataConfig dataConfig, EventHandler newDataAvailableHandler)
         {
-            lock (_locker)
+            if (!CanSubscribe(dataConfig.Symbol))
             {
-                var copy = _ticks.ToArray();
-                _ticks.Clear();
-                return copy;
+                return Enumerable.Empty<BaseData>().GetEnumerator();
             }
+
+            var enumerator = _dataAggregator.Add(dataConfig, newDataAvailableHandler);
+            _subscriptionManager.Subscribe(dataConfig);
+
+            return enumerator;
+        }
+
+        /// <summary>
+        /// Sets the job we're subscribing for
+        /// </summary>
+        /// <param name="job">Job we're subscribing for</param>
+        public void SetJob(LiveNodePacket job)
+        {
         }
 
         /// <summary>
         /// Adds the specified symbols to the subscription
         /// </summary>
-        /// <param name="job">Job we're subscribing for:</param>
         /// <param name="symbols">The symbols to be added keyed by SecurityType</param>
-        public void Subscribe(LiveNodePacket job, IEnumerable<Symbol> symbols)
+        private bool Subscribe(IEnumerable<Symbol> symbols)
         {
-            lock (_lockerSubscriptions)
-            {
-                var symbolsToSubscribe = (from symbol in symbols
-                                          where !_subscribedSymbols.Contains(symbol) && CanSubscribe(symbol)
-                                          select symbol).ToList();
-                if (symbolsToSubscribe.Count == 0)
-                    return;
-
-                Log.Trace($"CoinApiDataQueueHandler.Subscribe(): {string.Join(",", symbolsToSubscribe.Select(x => x.Value))}");
-
-                // CoinAPI requires at least 5 seconds between subscription requests so we need to batch them
-                _subscribedSymbols = symbolsToSubscribe.Concat(_subscribedSymbols).ToHashSet();
-
-                ProcessSubscriptionRequest();
-            }
+            ProcessSubscriptionRequest();
+            return true;
         }
+
+        /// <summary>
+        /// Removes the specified configuration
+        /// </summary>
+        /// <param name="dataConfig">Subscription config to be removed</param>
+        public void Unsubscribe(SubscriptionDataConfig dataConfig)
+        {
+            _subscriptionManager.Unsubscribe(dataConfig);
+            _dataAggregator.Remove(dataConfig);
+        }
+
 
         /// <summary>
         /// Removes the specified symbols to the subscription
         /// </summary>
-        /// <param name="job">Job we're processing.</param>
         /// <param name="symbols">The symbols to be removed keyed by SecurityType</param>
-        public void Unsubscribe(LiveNodePacket job, IEnumerable<Symbol> symbols)
+        private bool Unsubscribe(IEnumerable<Symbol> symbols)
         {
-            lock (_lockerSubscriptions)
-            {
-                var symbolsToUnsubscribe = (from symbol in symbols
-                                            where _subscribedSymbols.Contains(symbol)
-                                            select symbol).ToList();
-                if (symbolsToUnsubscribe.Count == 0)
-                    return;
-
-                Log.Trace($"CoinApiDataQueueHandler.Unsubscribe(): {string.Join(",", symbolsToUnsubscribe.Select(x => x.Value))}");
-
-                // CoinAPI requires at least 5 seconds between subscription requests so we need to batch them
-                _subscribedSymbols = _subscribedSymbols.Where(x => !symbolsToUnsubscribe.Contains(x)).ToHashSet();
-
-                ProcessSubscriptionRequest();
-            }
+            ProcessSubscriptionRequest();
+            return true;
         }
+
+        /// <summary>
+        /// Returns whether the data provider is connected
+        /// </summary>
+        /// <returns>true if the data provider is connected</returns>
+        public bool IsConnected => true;
 
         /// <summary>
         /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
@@ -133,6 +163,7 @@ namespace QuantConnect.ToolBox.CoinApi
             _client.QuoteEvent -= OnQuote;
             _client.Error -= OnError;
             _client.Dispose();
+            _dataAggregator.DisposeSafely();
         }
 
         /// <summary>
@@ -169,7 +200,7 @@ namespace QuantConnect.ToolBox.CoinApi
                             requestTime = _nextHelloMessageUtcTime;
                         }
 
-                        symbolsToSubscribe = _subscribedSymbols.ToList();
+                        symbolsToSubscribe = _subscriptionManager.GetSubscribedSymbols().ToList();
                     }
 
                     var timeToWait = requestTime - DateTime.UtcNow;
@@ -183,7 +214,7 @@ namespace QuantConnect.ToolBox.CoinApi
                         lock (_lockerSubscriptions)
                         {
                             _lastSubscribeRequestUtcTime = DateTime.UtcNow;
-                            if (_subscribedSymbols.Count == symbolsToSubscribe.Count)
+                            if (_subscriptionManager.GetSubscribedSymbols().Count() == symbolsToSubscribe.Count)
                             {
                                 // no more subscriptions pending, task finished
                                 _subscriptionsPending = false;
@@ -224,12 +255,12 @@ namespace QuantConnect.ToolBox.CoinApi
         {
             Log.Trace($"CoinApiDataQueueHandler.SubscribeSymbols(): {string.Join(",", symbolsToSubscribe)}");
 
-            SendHelloMessage(_subscribedSymbols.Select(_symbolMapper.GetBrokerageSymbol));
+            SendHelloMessage(symbolsToSubscribe.Select(_symbolMapper.GetBrokerageSymbol));
         }
 
         private void SendHelloMessage(IEnumerable<string> subscribeFilter)
         {
-            var list = subscribeFilter.ToList();
+            var list = subscribeFilter.Select(x => string.Concat(x, "$")).ToList();
             if (list.Count == 0)
             {
                 // If we use a null or empty filter in the CoinAPI hello message
@@ -242,7 +273,7 @@ namespace QuantConnect.ToolBox.CoinApi
             {
                 apikey = Guid.Parse(_apiKey),
                 heartbeat = true,
-                subscribe_data_type = new[] { "trade", "quote" },
+                subscribe_data_type = _streamingDataType,
                 subscribe_filter_symbol_id = list.ToArray()
             });
 
@@ -253,7 +284,7 @@ namespace QuantConnect.ToolBox.CoinApi
         {
             try
             {
-                var item = new Tick
+                var tick = new Tick
                 {
                     Symbol = _symbolMapper.GetLeanSymbol(trade.symbol_id, SecurityType.Crypto, string.Empty),
                     Time = trade.time_exchange,
@@ -264,7 +295,7 @@ namespace QuantConnect.ToolBox.CoinApi
 
                 lock (_locker)
                 {
-                    _ticks.Add(item);
+                    _dataAggregator.Update(tick);
                 }
             }
             catch (Exception e)
@@ -297,7 +328,7 @@ namespace QuantConnect.ToolBox.CoinApi
                         tick.BidPrice != previousQuote.BidPrice)
                     {
                         _previousQuotes[tick.Symbol] = tick;
-                        _ticks.Add(tick);
+                        _dataAggregator.Update(tick);
                     }
                 }
             }
@@ -310,6 +341,130 @@ namespace QuantConnect.ToolBox.CoinApi
         private void OnError(object sender, Exception e)
         {
             Log.Error(e);
+        }
+
+        #region SynchronizingHistoryProvider
+
+        public override void Initialize(HistoryProviderInitializeParameters parameters)
+        {
+            // NOP
+        }
+
+        public override IEnumerable<Slice> GetHistory(IEnumerable<HistoryRequest> requests, DateTimeZone sliceTimeZone)
+        {
+            var subscriptions = new List<Subscription>();
+            foreach (var request in requests)
+            {
+                var history = GetHistory(request);
+                var subscription = CreateSubscription(request, history);
+                subscriptions.Add(subscription);
+            }
+            return CreateSliceEnumerableFromSubscriptions(subscriptions, sliceTimeZone);
+        }
+
+        public IEnumerable<BaseData> GetHistory(HistoryRequest historyRequest)
+        {
+            if (historyRequest.Symbol.SecurityType != SecurityType.Crypto)
+            {
+                Log.Error($"CoinApiDataQueueHandler.GetHistory(): Invalid security type {historyRequest.Symbol.SecurityType}");
+                yield break;
+            }
+
+            if (historyRequest.Resolution == Resolution.Tick)
+            {
+                Log.Error("CoinApiDataQueueHandler.GetHistory(): No historical ticks, only OHLCV timeseries");
+                yield break;
+            }
+
+            if (historyRequest.DataType == typeof(QuoteBar))
+            {
+                Log.Error("CoinApiDataQueueHandler.GetHistory(): No historical QuoteBars , only TradeBars");
+                yield break;
+            }
+
+            var resolutionTimeSpan = historyRequest.Resolution.ToTimeSpan();
+            var lastRequestedBarStartTime = historyRequest.EndTimeUtc.RoundDown(resolutionTimeSpan);
+            var currentStartTime = historyRequest.StartTimeUtc.RoundUp(resolutionTimeSpan);
+            var currentEndTime = lastRequestedBarStartTime;
+
+            // Perform a check of the number of bars requested, this must not exceed a static limit
+            var dataRequestedCount = (currentEndTime - currentStartTime).Ticks 
+                                     / resolutionTimeSpan.Ticks;
+
+            if (dataRequestedCount > HistoricalDataPerRequestLimit)
+            {
+                currentEndTime = currentStartTime 
+                                 + TimeSpan.FromTicks(resolutionTimeSpan.Ticks * HistoricalDataPerRequestLimit);
+            }
+
+            while (currentStartTime < lastRequestedBarStartTime)
+            {
+                var coinApiSymbol = _symbolMapper.GetBrokerageSymbol(historyRequest.Symbol);
+                var coinApiPeriod = _ResolutionToCoinApiPeriodMappings[historyRequest.Resolution];
+
+                // Time must be in ISO 8601 format
+                var coinApiStartTime = currentStartTime.ToStringInvariant("s");
+                var coinApiEndTime = currentEndTime.ToStringInvariant("s");
+
+                // Construct URL for rest request
+                var baseUrl =
+                    "https://rest.coinapi.io/v1/ohlcv/" +
+                    $"{coinApiSymbol}/history?period_id={coinApiPeriod}&limit={HistoricalDataPerRequestLimit}" +
+                    $"&time_start={coinApiStartTime}&time_end={coinApiEndTime}";
+
+                // Execute
+                var client = new RestClient(baseUrl);
+                var restRequest = new RestRequest(Method.GET);
+                restRequest.AddHeader("X-CoinAPI-Key", _apiKey);
+                var response = client.Execute(restRequest);
+
+                // Log the information associated with the API Key's rest call limits.
+                TraceRestUsage(response);
+
+                // Deserialize to array
+                var coinApiHistoryBars = JsonConvert.DeserializeObject<HistoricalDataMessage[]>(response.Content);
+
+                // Can be no historical data for a short period interval
+                if (!coinApiHistoryBars.Any())
+                {
+                    Log.Error($"CoinApiDataQueueHandler.GetHistory(): API returned no data for the requested period [{coinApiStartTime} - {coinApiEndTime}] for symbol [{historyRequest.Symbol}]");
+                    continue;
+                }
+
+                foreach (var ohlcv in coinApiHistoryBars)
+                {
+                    yield return
+                        new TradeBar(ohlcv.TimePeriodStart, historyRequest.Symbol, ohlcv.PriceOpen, ohlcv.PriceHigh,
+                            ohlcv.PriceLow, ohlcv.PriceClose, ohlcv.VolumeTraded, historyRequest.Resolution.ToTimeSpan());
+                }
+
+                currentStartTime = currentEndTime;
+                currentEndTime += TimeSpan.FromTicks(resolutionTimeSpan.Ticks * HistoricalDataPerRequestLimit);
+            } 
+        }
+
+        #endregion
+
+        private void TraceRestUsage(IRestResponse response)
+        {
+            var total = GetHttpHeaderValue(response, "x-ratelimit-limit");
+            var used = GetHttpHeaderValue(response, "x-ratelimit-used");
+            var remaining = GetHttpHeaderValue(response, "x-ratelimit-remaining");
+
+            Log.Trace($"CoinApiDataQueueHandler.TraceRestUsage(): Used {used}, Remaining {remaining}, Total {total}");
+        }
+
+        private string GetHttpHeaderValue(IRestResponse response, string propertyName)
+        {
+            return response.Headers
+                .FirstOrDefault(x => x.Name == propertyName)?
+                .Value.ToString();
+        }
+
+        // WARNING: here to be called from tests to reduce explicitly the amount of request's output 
+        protected void SetUpHistDataLimit(int limit)
+        {
+            HistoricalDataPerRequestLimit = limit;
         }
     }
 }

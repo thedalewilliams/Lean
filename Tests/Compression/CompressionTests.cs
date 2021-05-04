@@ -13,7 +13,6 @@
  * limitations under the License.
 */
 
-using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -32,7 +31,7 @@ namespace QuantConnect.Tests.Compression
         {
             const string file = "../../../Data/equity/usa/minute/spy/20131008_trade.zip";
 
-            const int expected = 827;
+            const int expected = 828;
             int actual = QuantConnect.Compression.ReadLines(file).Count();
 
             Assert.AreEqual(expected, actual);
@@ -60,7 +59,7 @@ namespace QuantConnect.Tests.Compression
             var fileBytes = File.ReadAllBytes(file);
             var zippedBytes = QuantConnect.Compression.ZipBytes(fileBytes, "entry");
 
-            Assert.AreEqual(899352, zippedBytes.Length);
+            Assert.AreEqual(906121, zippedBytes.Length);
         }
 
         [Test]
@@ -176,6 +175,30 @@ namespace QuantConnect.Tests.Compression
             var actual = redata.Single();
             Assert.AreEqual(expected.Key, actual.Key);
             Assert.AreEqual(expected.Value, actual.Value);
+        }
+
+        [TestCase(true)]
+        [TestCase(false)]
+        public void ZipCreateAppendData(bool overrideEntry)
+        {
+            var name = $"PepeGrillo{overrideEntry}.zip";
+            if (File.Exists(name))
+            {
+                File.Delete(name);
+            }
+            QuantConnect.Compression.Zip("Pinocho", name, "cow");
+
+            Assert.AreEqual(overrideEntry, QuantConnect.Compression.ZipCreateAppendData(name, "cow", "jiji", overrideEntry));
+
+            var result = QuantConnect.Compression.Unzip(name).ToList();
+            Assert.AreEqual(1, result.Count);
+
+            var kvp = result.Single();
+            Assert.AreEqual("cow", kvp.Key);
+
+            var data = kvp.Value.ToList();
+            Assert.AreEqual(1, data.Count);
+            Assert.AreEqual((overrideEntry ? "jiji" : "Pinocho"), data[0]);
         }
     }
 }

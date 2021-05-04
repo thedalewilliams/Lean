@@ -48,14 +48,19 @@ namespace QuantConnect.Tests.Common
             var consumeCompleted = new ManualResetEvent(false);
             var consumeStarted = new ManualResetEvent(false);
 
-            Action code = () => minuteElapsed.WaitOne();
+            Action code = () =>
+            {
+                if (!minuteElapsed.WaitOne(10000))
+                {
+                    throw new TimeoutException("minuteElapsed");
+                }
+            };
             var provider = new FakeIsolatorLimitResultProvider();
             var timeProvider = new ManualTimeProvider(new DateTime(2000, 01, 01));
 
             Task.Run(() =>
             {
                 consumeStarted.Set();
-                var name = nameof(ConsumeRequestsAdditionalTimeAfterOneMinute);
                 provider.Consume(timeProvider, code, _timeMonitor);
                 consumeCompleted.Set();
             });

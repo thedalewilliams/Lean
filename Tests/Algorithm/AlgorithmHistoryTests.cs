@@ -45,7 +45,62 @@ namespace QuantConnect.Tests.Algorithm
         }
 
         [Test]
-        [TestCase(Resolution.Tick)]
+        public void TickResolutionHistoryRequest()
+        {
+            _algorithm = new QCAlgorithm();
+            _algorithm.SubscriptionManager.SetDataManager(new DataManagerStub(_algorithm));
+            _algorithm.HistoryProvider = new SubscriptionDataReaderHistoryProvider();
+            var dataProvider = new DefaultDataProvider();
+            var zipCacheProvider = new ZipDataCacheProvider(dataProvider);
+            _algorithm.HistoryProvider.Initialize(new HistoryProviderInitializeParameters(
+                null,
+                null,
+                dataProvider,
+                zipCacheProvider,
+                new LocalDiskMapFileProvider(),
+                new LocalDiskFactorFileProvider(),
+                null,
+                false,
+                new DataPermissionManager()));
+            _algorithm.SetStartDate(2013, 10, 08);
+            var start = new DateTime(2013, 10, 07);
+
+            // Trades and quotes
+            var result = _algorithm.History(new [] { Symbols.SPY }, start.AddHours(9.8), start.AddHours(10), Resolution.Tick).ToList();
+
+            // Just Trades
+            var result2 = _algorithm.History<Tick>(Symbols.SPY, start.AddHours(9.8), start.AddHours(10), Resolution.Tick).ToList();
+
+            zipCacheProvider.DisposeSafely();
+            Assert.IsNotEmpty(result);
+            Assert.IsNotEmpty(result2);
+
+            Assert.IsTrue(result2.All(tick => tick.TickType == TickType.Trade));
+
+            // (Trades and quotes).Count > Trades * 2
+            Assert.Greater(result.Count, result2.Count * 2);
+        }
+
+        [Test]
+        public void ImplicitTickResolutionHistoryRequestTradeBarApiThrowsException()
+        {
+            var spy = _algorithm.AddEquity("SPY", Resolution.Tick).Symbol;
+            Assert.Throws<InvalidOperationException>(() => _algorithm.History(spy, 1).ToList());
+        }
+
+        [Test]
+        public void TickResolutionHistoryRequestTradeBarApiThrowsException()
+        {
+            Assert.Throws<InvalidOperationException>(
+                () => _algorithm.History(Symbols.SPY, 1, Resolution.Tick).ToList());
+
+            Assert.Throws<InvalidOperationException>(
+                () => _algorithm.History(Symbols.SPY, TimeSpan.FromSeconds(2), Resolution.Tick).ToList());
+
+            Assert.Throws<InvalidOperationException>(
+                () => _algorithm.History(Symbols.SPY, DateTime.UtcNow.AddDays(-1), DateTime.UtcNow, Resolution.Tick).ToList());
+        }
+
         [TestCase(Resolution.Second)]
         [TestCase(Resolution.Minute)]
         [TestCase(Resolution.Hour)]
@@ -71,8 +126,6 @@ namespace QuantConnect.Tests.Algorithm
             Assert.AreEqual(TickType.Trade, _testHistoryProvider.HistryRequests.First().TickType);
         }
 
-        [Test]
-        [TestCase(Resolution.Tick)]
         [TestCase(Resolution.Second)]
         [TestCase(Resolution.Minute)]
         [TestCase(Resolution.Hour)]
@@ -129,7 +182,8 @@ namespace QuantConnect.Tests.Algorithm
                 new LocalDiskMapFileProvider(),
                 new LocalDiskFactorFileProvider(),
                 null,
-                false));
+                false,
+                new DataPermissionManager()));
 
             algorithm.SetDateTime(new DateTime(2014, 6, 6, 15, 0, 0));
 
@@ -145,7 +199,6 @@ namespace QuantConnect.Tests.Algorithm
 
             cacheProvider.DisposeSafely();
         }
-
 
         [Test]
         public void GetLastKnownPriceOfIlliquidAsset_TestData()
@@ -166,6 +219,113 @@ namespace QuantConnect.Tests.Algorithm
             var lastKnownPrice = _algorithm.GetLastKnownPrice(option);
             Assert.IsNotNull(lastKnownPrice);
             Assert.AreEqual(barTime.AddMinutes(1), lastKnownPrice.EndTime);
+        }
+
+        [Test]
+        public void TickResolutionOpenInterestHistoryRequestIsNotFilteredWhenRequestedExplicitly()
+        {
+            _algorithm = new QCAlgorithm();
+            _algorithm.SubscriptionManager.SetDataManager(new DataManagerStub(_algorithm));
+            _algorithm.HistoryProvider = new SubscriptionDataReaderHistoryProvider();
+            var dataProvider = new DefaultDataProvider();
+            var zipCacheProvider = new ZipDataCacheProvider(dataProvider);
+            _algorithm.HistoryProvider.Initialize(new HistoryProviderInitializeParameters(
+                null,
+                null,
+                dataProvider,
+                zipCacheProvider,
+                new LocalDiskMapFileProvider(),
+                new LocalDiskFactorFileProvider(),
+                null,
+                false,
+                new DataPermissionManager()));
+            var start = new DateTime(2014, 6, 05);
+            _algorithm.SetStartDate(start);
+            _algorithm.SetDateTime(start.AddDays(2));
+
+            _algorithm.UniverseSettings.FillForward = false;
+            var optionSymbol = Symbol.CreateOption("TWX", Market.USA, OptionStyle.American, OptionRight.Call, 23, new DateTime(2015, 1, 17));
+            var openInterests = _algorithm.History<OpenInterest>(optionSymbol, start, start.AddDays(2), Resolution.Minute).ToList();
+
+            zipCacheProvider.DisposeSafely();
+            Assert.IsNotEmpty(openInterests);
+
+            Assert.AreEqual(2, openInterests.Count);
+            Assert.AreEqual(new DateTime(2014, 06, 05, 6, 32, 0), openInterests[0].Time);
+            Assert.AreEqual(optionSymbol, openInterests[0].Symbol);
+            Assert.AreEqual(new DateTime(2014, 06, 06, 6, 32, 0), openInterests[1].Time);
+            Assert.AreEqual(optionSymbol, openInterests[1].Symbol);
+        }
+
+        [Test]
+        public void TickResolutionOpenInterestHistoryRequestIsFilteredByDefault_SingleSymbol()
+        {
+            _algorithm = new QCAlgorithm();
+            _algorithm.SubscriptionManager.SetDataManager(new DataManagerStub(_algorithm));
+            _algorithm.HistoryProvider = new SubscriptionDataReaderHistoryProvider();
+            var dataProvider = new DefaultDataProvider();
+            var zipCacheProvider = new ZipDataCacheProvider(dataProvider);
+            _algorithm.HistoryProvider.Initialize(new HistoryProviderInitializeParameters(
+                null,
+                null,
+                dataProvider,
+                zipCacheProvider,
+                new LocalDiskMapFileProvider(),
+                new LocalDiskFactorFileProvider(),
+                null,
+                false,
+                new DataPermissionManager()));
+            var start = new DateTime(2014, 6, 05);
+            _algorithm.SetStartDate(start);
+            _algorithm.SetDateTime(start.AddDays(2));
+
+            var optionSymbol = Symbol.CreateOption("TWX", Market.USA, OptionStyle.American, OptionRight.Call, 23, new DateTime(2015, 1, 17));
+            var result = _algorithm.History(new[] { optionSymbol }, start, start.AddDays(2), Resolution.Minute, fillForward:false).ToList();
+
+            zipCacheProvider.DisposeSafely();
+            Assert.IsNotEmpty(result);
+            Assert.IsTrue(result.Any(slice => slice.ContainsKey(optionSymbol)));
+
+            var openInterests = result.Select(slice => slice.Get(typeof(OpenInterest)) as DataDictionary<OpenInterest>).Where(dataDictionary => dataDictionary.Count > 0).ToList();
+
+            Assert.AreEqual(0, openInterests.Count);
+        }
+
+        [Test]
+        public void TickResolutionOpenInterestHistoryRequestIsFilteredByDefault_MultipleSymbols()
+        {
+            _algorithm = new QCAlgorithm();
+            _algorithm.SubscriptionManager.SetDataManager(new DataManagerStub(_algorithm));
+            _algorithm.HistoryProvider = new SubscriptionDataReaderHistoryProvider();
+            var dataProvider = new DefaultDataProvider();
+            var zipCacheProvider = new ZipDataCacheProvider(dataProvider);
+            _algorithm.HistoryProvider.Initialize(new HistoryProviderInitializeParameters(
+                null,
+                null,
+                dataProvider,
+                zipCacheProvider,
+                new LocalDiskMapFileProvider(),
+                new LocalDiskFactorFileProvider(),
+                null,
+                false,
+                new DataPermissionManager()));
+            var start = new DateTime(2014, 6, 05);
+            _algorithm.SetStartDate(start);
+            _algorithm.SetDateTime(start.AddDays(2));
+
+            var optionSymbol = Symbol.CreateOption("TWX", Market.USA, OptionStyle.American, OptionRight.Call, 23, new DateTime(2015, 1, 17));
+            var optionSymbol2 = Symbol.CreateOption("AAPL", Market.USA, OptionStyle.American, OptionRight.Call, 500, new DateTime(2015, 1, 17));
+            var result = _algorithm.History(new[] { optionSymbol, optionSymbol2 }, start, start.AddDays(2), Resolution.Minute, fillForward: false).ToList();
+
+            zipCacheProvider.DisposeSafely();
+            Assert.IsNotEmpty(result);
+
+            Assert.IsTrue(result.Any(slice => slice.ContainsKey(optionSymbol)));
+            Assert.IsTrue(result.Any(slice => slice.ContainsKey(optionSymbol2)));
+
+            var openInterests = result.Select(slice => slice.Get(typeof(OpenInterest)) as DataDictionary<OpenInterest>).Where(dataDictionary => dataDictionary.Count > 0).ToList();
+
+            Assert.AreEqual(0, openInterests.Count);
         }
 
         private class TestHistoryProvider : HistoryProviderBase
